@@ -13,15 +13,7 @@ Jobs survive process restarts. Workers run as threads or separate processes on t
 
 ## Install
 
-#### PyPI
-```bash
-pip install equeue
-```
-
-#### UV
-```bash
-uv add equeue
-```
+Not published yet.
 
 ---
 
