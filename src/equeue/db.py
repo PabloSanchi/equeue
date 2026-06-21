@@ -178,8 +178,6 @@ def decode(data: bytes) -> Any:
     return msgpack.unpackb(data, raw=False)
 
 
-# Lease encoding: expiry timestamp (F64) followed by an opaque claim token
-
 CLAIM_TOKEN_LEN = 16
 _LEASE_HEADER_LEN = F64.size
 
