@@ -1,9 +1,11 @@
 # EQueue
 
-[//]: # ([![Tests]&#40;https://github.com/PabloSanchi/equeue/actions/workflows/tests.yml/badge.svg&#41;]&#40;https://github.com/PabloSanchi/equeue/actions/workflows/tests.yml&#41;)
+
+[![Build](https://github.com/PabloSanchi/equeue/actions/workflows/build.yml/badge.svg)](https://github.com/PabloSanchi/equeue/actions/workflows/build.yml)
+[![Tests](https://github.com/PabloSanchi/equeue/actions/workflows/tests.yml/badge.svg)](https://github.com/PabloSanchi/equeue/actions/workflows/tests.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 <!-- [![PyPI](https://img.shields.io/pypi/v/equeue)](https://pypi.org/project/equeue/)
 [![Python](https://img.shields.io/pypi/pyversions/equeue)](https://pypi.org/project/equeue/) -->
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 **Persistent, crash-safe job queue for Python. No broker. No daemon. Just disk.**
 

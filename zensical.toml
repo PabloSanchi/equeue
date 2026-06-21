@@ -34,7 +34,7 @@ site_author = "EQueue contributors"
 #
 # Read more: https://zensical.org/docs/setup/basics/#copyright
 copyright = """
-Copyright &copy; 2026 The authors
+Copyright &copy; 2026 Pablo Sanchidrian
 """
 
 # Zensical supports both implicit navigation and explicitly defined navigation.
@@ -300,9 +300,9 @@ toggle.name = "Switch to light mode"
 # ----------------------------------------------------------------------------
 # The "extra" section contains miscellaneous settings.
 # ----------------------------------------------------------------------------
-#[[project.extra.social]]
-#icon = "fontawesome/brands/github"
-#link = "https://github.com/user/repo"
+[[project.extra.social]]
+icon = "fontawesome/brands/github"
+link = "https://github.com/PabloSanchi/equeue"
 
 # ----------------------------------------------------------------------------
 # In this section you can configure the Markdown extensions that are used when
