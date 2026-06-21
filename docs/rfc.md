@@ -35,7 +35,7 @@ Not a fit:
 | --- | --- |
 | Disk is the source of truth | Every job state change is written to LMDB **before** memory is updated. |
 | `queued/` index for coordination | A sorted `queued/<job_id>` key space in LMDB is the authoritative list of claimable jobs. It is written atomically with every state transition and is visible to all processes sharing the path. |
-| In-process fast-wake | A `threading.Event` per `Queue` instance allows threads in the same process to be woken instantly on `put()`, avoiding a full poll cycle. |
+| Uniform polling | All callers (threads in the same process and separate processes) discover new jobs by polling the `queued/` index at `poll_interval` (default 10 ms). A `threading.Event` (`_stop_event`) is used only to signal background threads to stop on `close()`. |
 | Blocking API | Calls like `put()` and `get()` block the caller. |
 | Fail loudly | Invalid operations raise `QueueCorrupted`. The queue must not silently break counters or state. |
 | Record owns completion | Job completion is performed through the `Record` returned by `get()`, not by passing a bare job ID. |
@@ -46,15 +46,16 @@ Not a fit:
 
 ```mermaid
 flowchart TD
-    PUT["put()"] -->|"write txn"| DB["LMDB on disk\n(job/ · state/ · queued/ · lease/ · retry/ · meta/)"]
-    PUT -->|"set()"| EVT["threading.Event\n(intra-process wake-up)"]
-    EVT -->|"wakes"| GET["get()"]
-    GET -->|"Phase 1 - read txn poll"| DB
-    GET -->|"Phase 2 - write txn claim"| DB
+    PUT["put()"] -->|"write txn"| DB["LMDB on disk\n(job/, state/, queued/, lease/, retry/, meta/)"]
+    GET["get()"] -->|"Phase 1: read txn\n(polls queued/ at poll_interval)"| DB
+    GET -->|"Phase 2: write txn claim"| DB
     REC["Record.ack() / nack()"] -->|"write txn"| DB
     BG1["Recovery thread"] -->|"write txn"| DB
     BG2["Vacuum thread"] -->|"write txn"| DB
-    P2["Process 2\nget() / put()"] -->|"poll_interval · write txn"| DB
+    CLOSE["close()"] -->|"set()"| STOP["threading.Event\n(_stop_event)"]
+    STOP -->|"terminates"| BG1
+    STOP -->|"terminates"| BG2
+    P2["Process 2\nget() / put()"] -->|"poll_interval + write txn"| DB
 ```
 
 On startup, the queue reads LMDB and rebuilds counters. The `queued/` index is the authoritative list of claimable jobs and is shared across all processes that open the same LMDB path.
@@ -63,12 +64,10 @@ On startup, the queue reads LMDB and rebuilds counters. The `queued/` index is t
 
 `get()` is split into two phases to keep LMDB write-lock contention minimal:
 
-1. **Read phase**: Open a read-only transaction and seek to the `queued/` prefix. Read transactions never block writers and run in parallel. If no entry is found, release the transaction and wait (on `threading.Event` intra-process, or on a timed sleep inter-process).
+1. **Read phase**: Open a read-only transaction and seek to the `queued/` prefix. Read transactions never block writers and run in parallel. If no entry is found, release the transaction, sleep for `poll_interval` (default 10 ms), then retry. This polling loop is used uniformly by both intra-process threads and cross-process instances.
 2. **Claim phase**: Open a write transaction, re-verify the job is still `PENDING` (another worker may have claimed it since the read), atomically remove its `queued/` entry, write `state/ = RUNNING`, and write the lease with a new claim token.
 
 The re-verification in Phase 2 is mandatory. It resolves the race where two workers both saw the same job in their Phase 1 snapshots: the second writer finds the state already `RUNNING` and retries Phase 1.
-
-**Write order:** disk first (`queued/` + `state/` in one atomic commit), then `threading.Event`. Never the opposite.
 
 ---
 
@@ -158,14 +157,11 @@ Only a **RUNNING** job with a **matching claim token** can be acked or nacked.
 
 ### `put(item)`
 
-Within one write transaction: writes payload and state to disk and inserts a `queued/<job_id>` entry. After commit, sets the intra-process `threading.Event` to wake any thread blocked in `get()` without waiting for the poll interval. Returns `job_id`.
+Within one write transaction: writes payload and state to disk and inserts a `queued/<job_id>` entry. Returns `job_id`. Waiting `get()` callers discover the new entry on their next poll cycle.
 
 ### `get(timeout)`
 
-Executes the two-phase claim described in section 3. Blocks until a job is available or `timeout` expires. Returns a `Record`.
-
-- **Intra-process**: wakes immediately when `threading.Event` is set by `put()` or `nack()`.
-- **Cross-process**: polls the LMDB `queued/` index at `poll_interval` (default 50 ms).
+Executes the two-phase claim described in section 3. Blocks until a job is available or `timeout` expires. Returns a `Record`. All callers (threads and separate processes) discover jobs by polling the `queued/` index at `poll_interval` (default 10 ms).
 
 ### `record.ack()`
 
@@ -201,7 +197,7 @@ A background thread deletes old DONE jobs from disk to save space. FAILED jobs a
 
 ### `close()`
 
-Stops background threads, drains the pending list, syncs disk, closes LMDB. Safe to call twice.
+Sets `_stop_event` (a `threading.Event`), which causes the recovery and vacuum background threads to exit their loops. Then joins the threads, syncs disk, and closes LMDB. Safe to call twice.
 
 ---
 
@@ -209,7 +205,7 @@ Stops background threads, drains the pending list, syncs disk, closes LMDB. Safe
 
 | Exception | When |
 | --- | --- |
-| `QueueEmpty` | `get(timeout=…)` timed out with no job |
+| `QueueEmpty` | `get(timeout=...)` timed out with no job |
 | `QueueClosed` | Queue was closed |
 | `QueueCorrupted` | Wrong state, wrong token, double ack, missing data on disk |
 
