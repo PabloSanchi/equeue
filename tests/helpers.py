@@ -1,7 +1,30 @@
+"""Multiprocessing test utilities."""
+
+from __future__ import annotations
+
 import multiprocessing
 import traceback
+from multiprocessing.synchronize import Event
 
-__all__ = ["ManagedProcess"]
+from equeue import Queue
+
+__all__ = ["ManagedProcess", "consumer_worker", "producer_worker"]
+
+
+def producer_worker(tmp: str, flag: Event) -> None:
+    """Producer worker: enqueues one job and signals readiness."""
+    with Queue[str](path=tmp, max_retries=0, do_recover=False, do_vacuum=False) as q:
+        q.put("rfc_mp_01: producer")
+        flag.set()
+
+
+def consumer_worker(tmp: str, flag: Event) -> None:
+    """Consumer worker: waits for the signal, claims and nacks the job."""
+    flag.wait()
+    with Queue[str](path=tmp, max_retries=0, do_recover=False, do_vacuum=False) as q:
+        record = q.get(timeout=1)
+        assert record.payload == "rfc_mp_01: producer"
+        record.nack()
 
 
 class ManagedProcess(multiprocessing.Process):

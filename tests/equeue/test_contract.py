@@ -12,17 +12,15 @@ import multiprocessing
 import time
 
 import pytest
-from helpers import ManagedProcess
+from helpers import ManagedProcess, consumer_worker, producer_worker
 from lmdb_helpers import (
     bogus_token,
-    consumer_worker,
     job_state,
     key_job,
     key_lease,
     key_retry,
     key_state,
     pending_job_ids,
-    producer_worker,
     queued_job_ids,
     retry_count,
     running_jobs_with_expired_leases,

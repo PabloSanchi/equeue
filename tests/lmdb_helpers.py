@@ -3,9 +3,8 @@
 from __future__ import annotations
 
 import time
-from multiprocessing.synchronize import Event
+from typing import TYPE_CHECKING
 
-from equeue import Queue
 from equeue.db import (
     CLAIM_TOKEN_LEN,
     PFX_QUEUED,
@@ -22,17 +21,18 @@ from equeue.db import (
     lease_expiry,
 )
 
+if TYPE_CHECKING:
+    from equeue import Queue
+
 __all__ = [
     "U32",
     "bogus_token",
-    "consumer_worker",
     "job_state",
     "key_job",
     "key_lease",
     "key_retry",
     "key_state",
     "pending_job_ids",
-    "producer_worker",
     "queued_job_ids",
     "retry_count",
     "running_jobs_with_expired_leases",
@@ -103,19 +103,3 @@ def pending_job_ids(q: Queue) -> set[int]:
                 if not cursor.next():
                     break
     return ids
-
-
-def producer_worker(tmp: str, flag: Event) -> None:
-    """Producer worker: enqueues one job and signals readiness."""
-    with Queue[str](path=tmp, max_retries=0, do_recover=False, do_vacuum=False) as q:
-        q.put("rfc_mp_01: producer")
-        flag.set()
-
-
-def consumer_worker(tmp: str, flag: Event) -> None:
-    """Consumer worker: waits for the signal, claims and nacks the job."""
-    flag.wait()
-    with Queue[str](path=tmp, max_retries=0, do_recover=False, do_vacuum=False) as q:
-        record = q.get(timeout=1)
-        assert record.payload == "rfc_mp_01: producer"
-        record.nack()
