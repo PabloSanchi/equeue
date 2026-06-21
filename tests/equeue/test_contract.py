@@ -8,16 +8,22 @@ Run one:  ``pytest -m rfc_rec_01 -v``
 
 from __future__ import annotations
 
+import multiprocessing
 import time
 
 import pytest
+from helpers import ManagedProcess
 from lmdb_helpers import (
     bogus_token,
+    consumer_worker,
     job_state,
     key_job,
     key_lease,
     key_retry,
     key_state,
+    pending_job_ids,
+    producer_worker,
+    queued_job_ids,
     retry_count,
     running_jobs_with_expired_leases,
 )
@@ -370,3 +376,127 @@ class TestCloseContracts:
 
         with pytest.raises(QueueClosed):
             record.nack()
+
+
+class TestMultiProcessingContracts:
+    """Multiprocessing rules (RFC-MP-*)."""
+
+    @pytest.mark.rfc_mp_01
+    def test_cross_instance_put_get_works(self, tmp: str) -> None:
+        """RCF-MP-01: Cross instance put and get successfully"""
+        flag = multiprocessing.Event()
+
+        producer = ManagedProcess(target=producer_worker, args=(tmp, flag))
+        consumer = ManagedProcess(target=consumer_worker, args=(tmp, flag))
+
+        consumer.start()
+        producer.start()
+
+        producer.join()
+        consumer.join()
+
+    @pytest.mark.rfc_mp_02
+    def test_concurrent_claim_delivers_each_job_exactly_once(self, tmp: str) -> None:
+        """RFC-MP-02: Concurrent claim delivers exactly once."""
+        flag = multiprocessing.Event()
+
+        producer = ManagedProcess(target=producer_worker, args=(tmp, flag))
+        consumer = ManagedProcess(target=consumer_worker, args=(tmp, flag))
+        consumer2 = ManagedProcess(target=consumer_worker, args=(tmp, flag))
+
+        consumer.start()
+        consumer2.start()
+        producer.start()
+
+        producer.join()
+        consumer_output = consumer.join_and_get()
+        consumer2_output = consumer2.join_and_get()
+
+        if consumer_output is not None and consumer2_output is not None:
+            raise AssertionError(
+                f"Contract Violation: Both consumers failed.\n"
+                f"C1: {repr(consumer_output)}\nC2: {repr(consumer2_output)}"
+            )
+
+        if consumer_output is None and consumer2_output is None:
+            raise AssertionError("Contract Violation: Both consumers successfully claimed the job")
+
+        failed_exception = consumer_output or consumer2_output
+        if not isinstance(failed_exception, QueueEmpty):
+            raise AssertionError(
+                f"Expected losing consumer to fail with QueueEmpty, "
+                f"but got: {repr(failed_exception)}"
+            )
+
+    @pytest.mark.rfc_mp_03
+    def test_queued_index_is_consistent_with_state_after_recovery(self, tmp: str) -> None:
+        """
+        RFC-MP-03: queued/ index mirrors state/ PENDING entries exactly after recovery.
+
+        Test simulate a crash, Queue A holds RUNNING jobs with short leases and closes
+        without completing them.
+         - j_expire will be moved FROM PENDING -> RUNNING (never ack/nack)
+         - j_done will be moved FROM PENDING -> RUNNING and then from RUNNING -> DONE (acked)
+         - j_pending will be created and never retrieved, PENDING
+
+        Queue B simulates a process restart, _recover() runs and reloads (j_expire and j_pending)
+        """
+        with Queue(tmp, lease_time=0.05, do_recover=False, do_vacuum=False) as q1:
+            j_expire = q1.put("will-expire")
+            j_done = q1.put("will-be-done")
+            j_pending = q1.put("stays-pending")
+
+            _ = q1.get()
+            r_done = q1.get()
+            r_done.ack()
+
+        time.sleep(0.2)
+
+        with Queue(tmp, do_recover=False, do_vacuum=False) as q2:
+            pending = pending_job_ids(q2)
+            queued = queued_job_ids(q2)
+
+            assert queued == pending, (
+                f"queued/ out of sync with state/: "
+                f"extra={queued - pending}, missing={pending - queued}"
+            )
+            assert j_expire in queued, f"Job {j_expire} was never recovered from the expired lease."
+            assert j_pending in queued, (
+                f"Job {j_pending} was never retrieved, should remain in PENDING"
+            )
+            assert j_done not in queued, f"Job {j_done} was finished, should never be re-queued"
+
+    @pytest.mark.rfc_mp_04
+    def test_recover_is_idempotent_across_instances(self, tmp: str) -> None:
+        """
+        RFC-MP-04: calling _recover() twice must not duplicate queued/ entries or double counters.
+
+        First Queue lets both of its running jobs expire.
+        Second Queue  should recover both of its expired jobs once, after subsequent recover
+        should take no effect.
+        """
+        with Queue(tmp, lease_time=0.05, do_recover=False, do_vacuum=False) as q1:
+            q1.put("job-a")
+            q1.put("job-b")
+            q1.get()
+            q1.get()
+
+        time.sleep(0.2)
+
+        with Queue(tmp, do_recover=False, do_vacuum=False) as q2:
+            queued_after_first = queued_job_ids(q2)
+            stats_after_first = q2.stats()
+
+            assert stats_after_first["pending"] == 2
+            assert stats_after_first["running"] == 0
+
+            q2._recover()
+
+            queued_after_second = queued_job_ids(q2)
+            stats_after_second = q2.stats()
+
+            assert queued_after_second == queued_after_first, (
+                "Second _recover() changed the queued/ index"
+            )
+            assert stats_after_second["pending"] == 2, "Second _recover() changed the pending count"
+            assert stats_after_second["running"] == 0, "Second _recover() changed the running count"
