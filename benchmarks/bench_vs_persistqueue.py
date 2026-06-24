@@ -1,99 +1,138 @@
-"""Comparison benchmark: EQueue (LMDB) vs persist-queue (SQLite)."""
+"""EQueue (LMDB) vs persist-queue (SQLite ack queue)."""
 
-import shutil
-import tempfile
-import time
+from __future__ import annotations
+
+import contextlib
+import functools
+import sqlite3
+from collections.abc import Callable, Iterator
 
 import persistqueue
+from _bench import PAYLOAD, Stat, format_table, repeat_trials, temp_dir
 
 from equeue import Queue
 
-PAYLOAD = "benchmark-payload"
 WARMUP = 200
-LOOPS = 2000
+OPS = 2000
+TRIALS = 7
+
+EQUEUE_KWARGS = {"do_recover": False, "do_vacuum": False}
 
 
-def measure(fn, loops):
-    for _ in range(WARMUP):
-        fn()
-    t0 = time.perf_counter()
-    for _ in range(loops):
-        fn()
-    return (time.perf_counter() - t0) / loops * 1e6
+def _set_sqlite_synchronous(q: persistqueue.SQLiteAckQueue, mode: str) -> None:
+    """Apply ``PRAGMA synchronous`` to every live connection of the queue."""
+    seen: set[int] = set()
+    for attr in ("_conn", "_putter", "_getter"):
+        conn = getattr(q, attr, None)
+        if isinstance(conn, sqlite3.Connection) and id(conn) not in seen:
+            conn.execute(f"PRAGMA synchronous={mode};")
+            seen.add(id(conn))
 
 
-def bench_equeue_put():
-    tmp = tempfile.mkdtemp()
-    q = Queue(tmp, do_recover=False, do_vacuum=False, sync=False)
-    try:
-        return measure(lambda: q.put(PAYLOAD), LOOPS)
-    finally:
-        q.close()
-        shutil.rmtree(tmp, ignore_errors=True)
+@contextlib.contextmanager
+def _equeue_put(*, sync: bool) -> Iterator[Callable[[], object]]:
+    with temp_dir() as path:
+        q = Queue(path, sync=sync, **EQUEUE_KWARGS)
+        try:
+            yield lambda: q.put(PAYLOAD)
+        finally:
+            q.close()
 
 
-def bench_equeue_roundtrip():
-    tmp = tempfile.mkdtemp()
-    q = Queue(tmp, do_recover=False, do_vacuum=False, sync=False)
-    try:
+@contextlib.contextmanager
+def _equeue_round_trip(*, sync: bool) -> Iterator[Callable[[], object]]:
+    with temp_dir() as path:
+        q = Queue(path, sync=sync, **EQUEUE_KWARGS)
 
-        def op():
+        def op() -> None:
             q.put(PAYLOAD)
             q.get().ack()
 
-        return measure(op, LOOPS)
-    finally:
-        q.close()
-        shutil.rmtree(tmp, ignore_errors=True)
+        try:
+            yield op
+        finally:
+            q.close()
 
 
-def bench_pq_put():
-    tmp = tempfile.mkdtemp()
-    q = persistqueue.SQLiteAckQueue(tmp, auto_commit=True, multithreading=False)
-    try:
-        return measure(lambda: q.put(PAYLOAD), LOOPS)
-    finally:
-        q.close()
-        shutil.rmtree(tmp, ignore_errors=True)
+@contextlib.contextmanager
+def _pq_queue(*, synchronous: str) -> Iterator[persistqueue.SQLiteAckQueue]:
+    with temp_dir() as path:
+        q = persistqueue.SQLiteAckQueue(path, auto_commit=True, multithreading=False)
+        _set_sqlite_synchronous(q, synchronous)
+        try:
+            yield q
+        finally:
+            with contextlib.suppress(Exception):
+                q.close()
 
 
-def bench_pq_roundtrip():
-    tmp = tempfile.mkdtemp()
-    q = persistqueue.SQLiteAckQueue(tmp, auto_commit=True, multithreading=False)
-    try:
+@contextlib.contextmanager
+def _pq_put(*, synchronous: str) -> Iterator[Callable[[], object]]:
+    with _pq_queue(synchronous=synchronous) as q:
+        yield lambda: q.put(PAYLOAD)
 
-        def op():
+
+@contextlib.contextmanager
+def _pq_round_trip(*, synchronous: str) -> Iterator[Callable[[], object]]:
+    with _pq_queue(synchronous=synchronous) as q:
+
+        def op() -> None:
             q.put(PAYLOAD)
-            item = q.get()
-            q.ack(item)
+            q.ack(q.get())
 
-        return measure(op, LOOPS)
-    finally:
-        q.close()
-        shutil.rmtree(tmp, ignore_errors=True)
+        yield op
+
+REGIMES = {
+    "durable (fsync)": (True, "FULL"),
+    "fast (no fsync)": (False, "OFF"),
+}
+
+
+def _measure(trial: Callable[[], object]) -> Stat:
+    return repeat_trials(trial, ops=OPS, warmup=WARMUP, trials=TRIALS)
+
+
+def main() -> None:
+    print(
+        "EQueue (LMDB) vs persist-queue (SQLite), matched durability\n"
+        f"payload {len(PAYLOAD)} chars | {WARMUP} warmup + {OPS} ops/trial | "
+        f"median of {TRIALS} trials\n"
+    )
+
+    rows: list[list[str]] = []
+    for regime, (eq_sync, pq_sync) in REGIMES.items():
+        scenarios = (
+            (
+                "put",
+                functools.partial(_equeue_put, sync=eq_sync),
+                functools.partial(_pq_put, synchronous=pq_sync),
+            ),
+            (
+                "put+get+ack",
+                functools.partial(_equeue_round_trip, sync=eq_sync),
+                functools.partial(_pq_round_trip, synchronous=pq_sync),
+            ),
+        )
+        for scenario, eq_trial, pq_trial in scenarios:
+            eq = _measure(eq_trial)
+            pq = _measure(pq_trial)
+            rows.append(
+                [
+                    regime,
+                    scenario,
+                    f"{eq.median:.1f} +/- {eq.stdev:.1f}",
+                    f"{pq.median:.1f} +/- {pq.stdev:.1f}",
+                    f"{pq.median / eq.median:.1f}x",
+                ]
+            )
+
+    print(
+        format_table(
+            ["regime", "scenario", "equeue (us)", "persist-queue (us)", "speedup"],
+            rows,
+        )
+    )
 
 
 if __name__ == "__main__":
-    print(
-        "EQueue (LMDB) vs persist-queue (SQLite)\n",
-        f"Payload: {len(PAYLOAD)} chars, {WARMUP} warmup, {LOOPS} measured loops",
-        end="\n\n",
-    )
-
-    eq_put = bench_equeue_put()
-    pq_put = bench_pq_put()
-    eq_rt = bench_equeue_roundtrip()
-    pq_rt = bench_pq_roundtrip()
-
-    put_speedup = pq_put / eq_put
-    rt_speedup = pq_rt / eq_rt
-
-    print(
-        "scenario\tequeue (us)\tpersist-queue (us)\tspeedup\n",
-        f"put()\t{eq_put:.1f}\t{pq_put:.1f}\t{put_speedup:.0f}x faster\n",
-        f"put+get+ack\t{eq_rt:.1f}\t{pq_rt:.1f}\t{rt_speedup:.0f}x faster\n\n",
-        f"EQueue is {put_speedup:.0f}x faster on put() and {rt_speedup:.0f}x"
-        "faster on a round-trip.\nBoth queues run without fsync.",
-        "EQueue uses LMDB memory-mapped I/O; persist-queue uses SQLite with a journal write",
-        "and B-tree update per operation.",
-    )
+    main()

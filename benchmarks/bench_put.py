@@ -1,29 +1,30 @@
-"""Benchmark: put() throughput."""
+"""put() throughput (single thread, no fsync), measured with pyperf."""
 
-import shutil
-import tempfile
+from __future__ import annotations
 
 import pyperf
+from _bench import PAYLOAD, temp_dir
 
 from equeue import Queue
 
-PAYLOAD = "benchmark-payload"
 
-
-def bench_put(loops, q):
-    t0 = pyperf.perf_counter()
+def bench_put(loops: int, q: Queue) -> float:
+    start = pyperf.perf_counter()
     for _ in range(loops):
         q.put(PAYLOAD)
-    return pyperf.perf_counter() - t0
+    return pyperf.perf_counter() - start
 
 
-tmp = tempfile.mkdtemp()
-q = Queue(tmp, do_recover=False, do_vacuum=False, sync=False)
+def main() -> None:
+    with temp_dir() as path:
+        q = Queue(path, do_recover=False, do_vacuum=False, sync=False)
+        try:
+            runner = pyperf.Runner()
+            runner.argparser.set_defaults(values=20)
+            runner.bench_time_func("put", bench_put, q)
+        finally:
+            q.close()
 
-runner = pyperf.Runner()
-runner.argparser.set_defaults(values=20)
-try:
-    runner.bench_time_func("put", bench_put, q)
-finally:
-    q.close()
-    shutil.rmtree(tmp, ignore_errors=True)
+
+if __name__ == "__main__":
+    main()

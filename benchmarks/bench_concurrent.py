@@ -1,62 +1,84 @@
-"""Benchmark: concurrent claim throughput with multiple threads."""
+"""Concurrent claim throughput with multiple worker threads."""
 
-import shutil
-import tempfile
+from __future__ import annotations
+
+import statistics
 import threading
 import time
+
+from _bench import PAYLOAD, temp_queue
 
 from equeue import Queue, QueueEmpty
 
 THREAD_COUNTS = [1, 2, 4, 8]
-N_JOBS = 200
-PAYLOAD = "benchmark-payload"
+N_JOBS = 2000
+TRIALS = 5
+_DRAIN_POLL = 0.02
 
 
-def worker(q, results, idx, done):
-    claimed = 0
-    while not done.is_set():
+class Drain:
+    """Counts claims and records when the final job is taken."""
+
+    def __init__(self, total: int) -> None:
+        self._total = total
+        self._lock = threading.Lock()
+        self.claimed = 0
+        self.finished_at = 0.0
+
+    def record_claim(self) -> bool:
+        """Register one claim; return True once all jobs have been claimed."""
+        with self._lock:
+            self.claimed += 1
+            if self.claimed == self._total:
+                self.finished_at = time.perf_counter()
+                return True
+            return False
+
+
+def _worker(q: Queue, drain: Drain, stop: threading.Event) -> None:
+    while not stop.is_set():
         try:
-            q.get(timeout=0.05).ack()
-            claimed += 1
+            q.get(timeout=_DRAIN_POLL).ack()
         except QueueEmpty:
-            break
-    results[idx] = claimed
+            return
+        if drain.record_claim():
+            stop.set()
+            return
 
 
-def run_once(n_threads):
-    tmp = tempfile.mkdtemp()
-    try:
-        q = Queue(tmp, do_recover=False, do_vacuum=False, sync=False)
-
+def _run_once(n_threads: int) -> float:
+    """Return jobs/sec for one drain of ``N_JOBS`` by ``n_threads`` workers."""
+    with temp_queue(do_recover=False, do_vacuum=False, sync=False) as q:
         for _ in range(N_JOBS):
             q.put(PAYLOAD)
 
-        results = [0] * n_threads
-        done = threading.Event()
+        drain = Drain(N_JOBS)
+        stop = threading.Event()
         threads = [
-            threading.Thread(target=worker, args=(q, results, i, done)) for i in range(n_threads)
+            threading.Thread(target=_worker, args=(q, drain, stop)) for _ in range(n_threads)
         ]
 
         start = time.perf_counter()
-
         for thread in threads:
             thread.start()
         for thread in threads:
             thread.join()
 
-        elapsed = time.perf_counter() - start
-        done.set()
+    elapsed = drain.finished_at - start
+    if drain.claimed != N_JOBS or elapsed <= 0:
+        raise AssertionError(f"drained {drain.claimed}/{N_JOBS} jobs in {elapsed:.6f}s")
+    return N_JOBS / elapsed
 
-        q.close()
-        assert sum(results) == N_JOBS, f"Lost jobs: got {sum(results)}, expected {N_JOBS}"
-        return elapsed
-    finally:
-        shutil.rmtree(tmp, ignore_errors=True)
+
+def main() -> None:
+    print(
+        f"Concurrent claim: {N_JOBS} jobs, median of {TRIALS} trials\n"
+        f"{'threads':>8}  {'jobs/sec':>12}"
+    )
+    for n_threads in THREAD_COUNTS:
+        rates = [_run_once(n_threads) for _ in range(TRIALS)]
+        print(f"{n_threads:>8}  {statistics.median(rates):>12,.0f}")
 
 
 if __name__ == "__main__":
-    print(f"Concurrent claim benchmark: {N_JOBS} jobs\nthreads\ttime (ms)\tjobs/sec")
-    for t in THREAD_COUNTS:
-        elapsed = run_once(t)
-        jobs_per_sec = N_JOBS / elapsed
-        print(f"{t}\t{elapsed * 1000:.1f}\t{jobs_per_sec:.0f}")
+    main()

@@ -1,43 +1,40 @@
-"""Benchmark: _recover() time for N expired running jobs."""
+"""_recover() cost vs. number of expired in-flight jobs (startup-after-crash)."""
 
-import shutil
-import tempfile
+from __future__ import annotations
+
+import statistics
 import time
 
-from equeue import Queue
+from _bench import PAYLOAD, format_table, temp_queue
 
 SIZES = [100, 500, 1000, 5000]
-REPS = 5
-PAYLOAD = "benchmark-payload"
+TRIALS = 7
 
 
-def run_once(n):
-    """Run jobs and let them expire, so then they can be recovered"""
-    tmp = tempfile.mkdtemp()
-    try:
-        q = Queue(tmp, lease_time=0.001, do_recover=False, do_vacuum=False, sync=False)
-        for _ in range(n):
+def _recover_seconds(n_jobs: int) -> float:
+    with temp_queue(lease_time=0.001, do_recover=False, do_vacuum=False, sync=False) as q:
+        for _ in range(n_jobs):
             q.put(PAYLOAD)
             q.get()
-
         time.sleep(0.05)
 
         start = time.perf_counter()
         recovered = q._recover()
         elapsed = time.perf_counter() - start
 
-        assert recovered == n, f"Expected {n} recovered, got {recovered}"
-        q.close()
-        return elapsed
-    finally:
-        shutil.rmtree(tmp, ignore_errors=True)
+        if recovered != n_jobs:
+            raise AssertionError(f"expected {n_jobs} recovered, got {recovered}")
+    return elapsed
+
+
+def main() -> None:
+    print(f"Recovery cost, median of {TRIALS} trials\n")
+    rows: list[list[str]] = []
+    for n_jobs in SIZES:
+        median_s = statistics.median(_recover_seconds(n_jobs) for _ in range(TRIALS))
+        rows.append([str(n_jobs), f"{median_s * 1e3:.2f}", f"{median_s / n_jobs * 1e6:.2f}"])
+    print(format_table(["jobs", "median (ms)", "per job (us)"], rows))
 
 
 if __name__ == "__main__":
-    print(f"Recovery benchmark ({REPS} reps each)\nn_jobs\tmean (ms)\tmin (ms)\tmax (ms)")
-    for n in SIZES:
-        times = [run_once(n) for _ in range(REPS)]
-        mean_ms = sum(times) / len(times) * 1000
-        min_ms = min(times) * 1000
-        max_ms = max(times) * 1000
-        print(f"{n}\t{mean_ms:.2f}\t{min_ms:.2f}\t{max_ms:.2f}")
+    main()

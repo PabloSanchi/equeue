@@ -1,22 +1,23 @@
-"""Benchmark: _vacuum() time for N done jobs."""
+"""_vacuum() cost vs. number of DONE jobs to reclaim.
 
-import shutil
-import tempfile
+Measures the time to delete N completed jobs (all four key families per job) in
+a single write transaction, the work the background vacuum thread performs.
+"""
+
+from __future__ import annotations
+
+import statistics
 import time
 
-from equeue import Queue
+from _bench import PAYLOAD, format_table, temp_queue
 
 SIZES = [100, 500, 1000, 5000]
-REPS = 5
-PAYLOAD = "benchmark-payload"
+TRIALS = 7
 
 
-def run_once(n):
-    """Execute n jobs with ack, let them be vacuumed later"""
-    tmp = tempfile.mkdtemp()
-    try:
-        q = Queue(tmp, do_recover=False, do_vacuum=False, sync=False)
-        for _ in range(n):
+def _vacuum_seconds(n_jobs: int) -> float:
+    with temp_queue(do_recover=False, do_vacuum=False, sync=False) as q:
+        for _ in range(n_jobs):
             q.put(PAYLOAD)
             q.get().ack()
 
@@ -24,18 +25,19 @@ def run_once(n):
         removed = q._vacuum()
         elapsed = time.perf_counter() - start
 
-        assert removed == n, f"Expected {n} removed, got {removed}"
-        q.close()
-        return elapsed
-    finally:
-        shutil.rmtree(tmp, ignore_errors=True)
+        if removed != n_jobs:
+            raise AssertionError(f"expected {n_jobs} removed, got {removed}")
+    return elapsed
+
+
+def main() -> None:
+    print(f"Vacuum cost, median of {TRIALS} trials\n")
+    rows: list[list[str]] = []
+    for n_jobs in SIZES:
+        median_s = statistics.median(_vacuum_seconds(n_jobs) for _ in range(TRIALS))
+        rows.append([str(n_jobs), f"{median_s * 1e3:.2f}", f"{median_s / n_jobs * 1e6:.2f}"])
+    print(format_table(["jobs", "median (ms)", "per job (us)"], rows))
 
 
 if __name__ == "__main__":
-    print(f"Vacuum benchmark ({REPS} reps each)\nn_jobs\tmean (ms)\tmin (ms)\tmax (ms)")
-    for n in SIZES:
-        times = [run_once(n) for _ in range(REPS)]
-        mean_ms = sum(times) / len(times) * 1000
-        min_ms = min(times) * 1000
-        max_ms = max(times) * 1000
-        print(f"{n}\t{mean_ms:.2f}\t{min_ms:.2f}\t{max_ms:.2f}")
+    main()
