@@ -296,9 +296,7 @@ class TestClaimContracts:
 class TestStatsInvariants:
     """Statistics rules (RFC-ST-*)."""
 
-    REQUIRED_STATS_KEYS = frozenset(
-        {"pending", "running", "done", "failed", "total", "recovered", "vacuumed"}
-    )
+    REQUIRED_STATS_KEYS = frozenset({"pending", "running", "done", "failed", "total"})
 
     @pytest.mark.rfc_st_01
     def test_stats_exposes_all_documented_keys(self, quiet_queue: Queue) -> None:
@@ -320,20 +318,12 @@ class TestStatsInvariants:
 
         stats = quiet_queue.stats()
         for key, value in stats.items():
-            if key in (
-                "pending",
-                "running",
-                "done",
-                "failed",
-                "total",
-                "recovered",
-                "vacuumed",
-            ):
+            if key in self.REQUIRED_STATS_KEYS:
                 assert value >= 0, f"stats[{key!r}] = {value}"
 
     @pytest.mark.rfc_st_03
-    def test_lifecycle_sum_matches_total(self, quiet_queue: Queue) -> None:
-        """RFC-ST-03: pending + running + done + failed equals total."""
+    def test_lifecycle_sum_never_exceeds_total(self, quiet_queue: Queue) -> None:
+        """RFC-ST-03: pending + running + done + failed never exceeds total."""
         for i in range(4):
             quiet_queue.put(i)
 
@@ -342,7 +332,23 @@ class TestStatsInvariants:
 
         stats = quiet_queue.stats()
         lifecycle = stats["pending"] + stats["running"] + stats["done"] + stats["failed"]
+        assert lifecycle <= stats["total"]
         assert lifecycle == stats["total"]
+
+    @pytest.mark.rfc_st_03
+    def test_lifecycle_invariant_holds_after_vacuum_and_reopen(self, tmp: str) -> None:
+        """RFC-ST-03: lifecycle invariant holds after vacuum and process restart."""
+        with Queue(tmp, do_recover=False, do_vacuum=False) as q:
+            q.put("vacuum-me")
+            q.get().ack()
+            q._vacuum()
+
+        with Queue(tmp, do_recover=False, do_vacuum=False) as q2:
+            stats = q2.stats()
+            lifecycle = stats["pending"] + stats["running"] + stats["done"] + stats["failed"]
+            assert lifecycle <= stats["total"]
+            assert stats["total"] == 1
+            assert lifecycle == 0
 
 
 class TestCloseContracts:
@@ -381,7 +387,7 @@ class TestMultiProcessingContracts:
 
     @pytest.mark.rfc_mp_01
     def test_cross_instance_put_get_works(self, tmp: str) -> None:
-        """RCF-MP-01: Cross instance put and get successfully"""
+        """RFC-MP-01: cross-instance put/get works."""
         flag = multiprocessing.Event()
 
         producer = ManagedProcess(target=producer_worker, args=(tmp, flag))

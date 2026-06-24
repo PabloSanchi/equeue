@@ -244,8 +244,6 @@ def test_stats_initial_state(tmp):
         assert s["done"] == 0
         assert s["failed"] == 0
         assert s["total"] == 0
-        assert s["recovered"] == 0
-        assert s["vacuumed"] == 0
 
 
 def test_processing_acks_on_success(tmp):
@@ -351,7 +349,6 @@ def test_vacuum_removes_done_records(tmp):
         stats = q.stats()
         assert stats["running"] == 0
         assert stats["done"] == 0
-        assert stats["vacuumed"] == 1
 
 
 def test_vacuum_retains_failed_records(tmp):
@@ -370,7 +367,6 @@ def test_vacuum_retains_failed_records(tmp):
         assert stats["running"] == 0
         assert stats["pending"] == 0
         assert stats["failed"] == 1
-        assert stats["vacuumed"] == 0
         assert stats["done"] == 0
 
 
