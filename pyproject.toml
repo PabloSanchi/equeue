@@ -17,7 +17,7 @@ dependencies = [
 
 [dependency-groups]
 dev = [
-    "cython>=3.2.5",
+    "cython>=3.2.6",
     "mypy>=2.1.0",
     "pysonar>=1.6.0.4905",
     "pytest>=9.1.1",
