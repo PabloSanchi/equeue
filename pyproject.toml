@@ -25,7 +25,7 @@ dev = [
     "ruff>=0.15.20",
     "setuptools>=82.0.1",
     "wheel>=0.47.0",
-    "zensical>=0.0.45",
+    "zensical>=0.0.46",
 ]
 benchmarks = [
     "persist-queue>=1.1.0",
